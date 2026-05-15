@@ -61,6 +61,12 @@ class CoupleController extends Controller
             ], 422);
         }
 
+        if ($request->male_id === $request->femelle_id) {
+            return response()->json([
+                'message' => 'Un pigeon ne peut pas être à la fois mâle et femelle du couple'
+            ], 422);
+        }
+
         // Vérifier que le mâle est actif
         if ($male->statut !== 'actif') {
             return response()->json([
@@ -271,6 +277,14 @@ class CoupleController extends Controller
                 'date_formation.date' => 'La date de formation doit être une date valide',
                 'date_formation.before_or_equal' => 'La date de formation ne peut pas être dans le futur',
             ]);
+        }
+
+        $maleId = $request->input('male_id', $couple->male_id);
+        $femelleId = $request->input('femelle_id', $couple->femelle_id);
+        if ($maleId === $femelleId) {
+            return response()->json([
+                'message' => 'Un pigeon ne peut pas être à la fois mâle et femelle du couple'
+            ], 422);
         }
 
         // Mettre à jour le couple

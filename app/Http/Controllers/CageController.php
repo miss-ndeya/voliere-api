@@ -126,7 +126,13 @@ class CageController extends Controller
     public function store(Request $request)
     {
         $request->validate([
-            'numero' => 'required|string|unique:cages,numero',
+            'numero' => [
+                'required',
+                'string',
+                \Illuminate\Validation\Rule::unique('cages')->where(function ($query) {
+                    return $query->where('user_id', auth()->id());
+                })
+            ],
             'nom' => 'required|string|max:255',
             'superficie' => 'nullable|numeric|min:0',
         ], [
@@ -178,7 +184,13 @@ class CageController extends Controller
         }
 
         $request->validate([
-            'numero' => 'sometimes|string|unique:cages,numero,' . $cage->id,
+            'numero' => [
+                'sometimes',
+                'string',
+                \Illuminate\Validation\Rule::unique('cages')->where(function ($query) {
+                    return $query->where('user_id', auth()->id());
+                })->ignore($cage->id)
+            ],
             'nom' => 'sometimes|string|max:255',
             'superficie' => 'nullable|numeric|min:0',
         ], [
@@ -230,11 +242,27 @@ class CageController extends Controller
                 ], 422);
             }
 
-            // Vérifier que le pigeon n'est pas déjà dans une cage
+            // Vérifier que le pigeon n'est pas déjà dans une cage seul
             if ($pigeon->cage) {
                 return response()->json([
                     'message' => 'Ce pigeon est déjà affecté à une cage. Veuillez d\'abord le retirer de sa cage actuelle.'
                 ], 422);
+            }
+
+            // Vérifier que le pigeon ne fait pas partie d'un couple actif
+            $coupleActif = $pigeon->coupleComeMale()->where('actif', true)->first() 
+                        ?? $pigeon->coupleComeFemelle()->where('actif', true)->first();
+            
+            if ($coupleActif) {
+                if ($coupleActif->cage) {
+                    return response()->json([
+                        'message' => 'Ce pigeon fait partie d\'un couple qui occupe déjà une cage. Veuillez d\'abord libérer la cage du couple.'
+                    ], 422);
+                } else {
+                    return response()->json([
+                        'message' => 'Ce pigeon fait partie d\'un couple actif. Pour l\'affecter seul, vous devez d\'abord dissoudre le couple.'
+                    ], 422);
+                }
             }
 
             $cage->update([
@@ -363,12 +391,21 @@ class CageController extends Controller
         return response()->json(['message' => 'Cage supprimée avec succès']);
     }
 
-    // Récupérer les pigeons disponibles pour affectation (actifs et sans cage)
+    // Récupérer les pigeons disponibles pour affectation (actifs, sans cage, et sans couple actif)
     public function pigeonsDisponibles()
     {
         $pigeons = Pigeon::where('user_id', auth()->id())
             ->where('statut', 'actif')
+            // Exclure les pigeons qui occupent une cage seuls
             ->whereDoesntHave('cage')
+            // Exclure les pigeons mâles qui font partie d'un couple actif (avec ou sans cage)
+            ->whereDoesntHave('coupleComeMale', function($query) {
+                $query->where('actif', true);
+            })
+            // Exclure les pigeons femelles qui font partie d'un couple actif (avec ou sans cage)
+            ->whereDoesntHave('coupleComeFemelle', function($query) {
+                $query->where('actif', true);
+            })
             ->orderBy('bague')
             ->get(['id', 'bague', 'race', 'sexe']);
 
