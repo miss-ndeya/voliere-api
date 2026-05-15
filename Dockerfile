@@ -21,5 +21,4 @@ RUN composer install --no-dev --optimize-autoloader
 
 EXPOSE 8000
 
-ENTRYPOINT ["sh", "-c"]
-CMD ["php artisan migrate --force && php artisan serve --host=0.0.0.0 --port=$PORT"]
+CMD ["sh", "-c", "php artisan migrate --force && php artisan serve --host=0.0.0.0 --port=$PORT"]
