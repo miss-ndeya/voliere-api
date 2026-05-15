@@ -1,4 +1,4 @@
-# 🕊️ Volière API - Backend
+# Volière API - Backend
 
 API RESTful pour la gestion complète d'une volière de pigeons.
 
