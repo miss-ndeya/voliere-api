@@ -102,21 +102,23 @@ class SortieController extends Controller
             ]);
         }
 
-        // Rompre le couple si le pigeon était en couple
-        if ($pigeon->coupleComeMale) {
-            $pigeon->coupleComeMale->update(['actif' => false]);
-            if ($pigeon->coupleComeMale->cage) {
-                $pigeon->coupleComeMale->cage->update([
+        // Rompre le couple actif si le pigeon était en couple
+        $coupleMale = $pigeon->coupleComeMale()->where('actif', true)->first();
+        if ($coupleMale) {
+            $coupleMale->update(['actif' => false]);
+            if ($coupleMale->cage) {
+                $coupleMale->cage->update([
                     'statut' => 'libre',
                     'couple_id' => null,
                 ]);
             }
         }
 
-        if ($pigeon->coupleComeFemelle) {
-            $pigeon->coupleComeFemelle->update(['actif' => false]);
-            if ($pigeon->coupleComeFemelle->cage) {
-                $pigeon->coupleComeFemelle->cage->update([
+        $coupleFemelle = $pigeon->coupleComeFemelle()->where('actif', true)->first();
+        if ($coupleFemelle) {
+            $coupleFemelle->update(['actif' => false]);
+            if ($coupleFemelle->cage) {
+                $coupleFemelle->cage->update([
                     'statut' => 'libre',
                     'couple_id' => null,
                 ]);
@@ -186,15 +188,20 @@ class SortieController extends Controller
         return response()->json($sortie->load('pigeon'));
     }
 
-    // Supprimer une sortie
+    // Supprimer une sortie et remettre le pigeon en actif
     public function destroy($id)
     {
-        // Récupérer la sortie manuellement
         $sortie = Sortie::where('user_id', auth()->id())->findOrFail($id);
+        $pigeon = $sortie->pigeon;
+
+        if ($pigeon && $pigeon->user_id === auth()->id()) {
+            $pigeon->update(['statut' => 'actif']);
+        }
+
         $sortie->delete();
 
         return response()->json([
-            'message' => 'Sortie supprimée'
+            'message' => 'Sortie supprimée. Le pigeon est de nouveau actif.'
         ]);
     }
 }

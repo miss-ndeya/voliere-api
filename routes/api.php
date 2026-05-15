@@ -19,6 +19,10 @@ Route::middleware('auth:sanctum')->group(function () {
     // Utilisateur connecté
     Route::get('/user', [AuthController::class, 'user']);
 
+    // Profil utilisateur
+    Route::put('/profile', [AuthController::class, 'updateProfile']);
+    Route::put('/profile/password', [AuthController::class, 'updatePassword']);
+
     // Déconnexion
     Route::post('/logout', [AuthController::class, 'logout']);
 

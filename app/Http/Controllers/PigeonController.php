@@ -8,11 +8,20 @@ use Illuminate\Http\Request;
 class PigeonController extends Controller
 {
     // Liste tous les pigeons (sauf ceux soft deleted)
-    public function index()
+    public function index(Request $request)
     {
-        $pigeons = Pigeon::where('user_id', auth()->id())
+        $query = Pigeon::where('user_id', auth()->id())
             ->with(['pere', 'mere'])
-            ->get();
+            ->withCount(['enfantsComePere', 'enfantsComeMere']);
+
+        if ($request->filled('statut') && $request->statut !== 'tous') {
+            $query->where('statut', $request->statut);
+        }
+
+        $pigeons = $query->orderBy('bague')->get()->map(function ($pigeon) {
+            $pigeon->has_descendants = ($pigeon->enfants_come_pere_count + $pigeon->enfants_come_mere_count) > 0;
+            return $pigeon;
+        });
 
         return response()->json($pigeons);
     }
@@ -21,7 +30,13 @@ class PigeonController extends Controller
     public function store(Request $request)
     {
         $request->validate([
-            'bague' => 'required|string|unique:pigeons',
+            'bague' => [
+                'required',
+                'string',
+                \Illuminate\Validation\Rule::unique('pigeons')->where(function ($query) {
+                    return $query->where('user_id', auth()->id());
+                })
+            ],
             'sexe' => 'required|in:male,femelle',
             'race' => 'required|string',
             'date_naissance' => 'nullable|date|before_or_equal:today',
@@ -118,7 +133,13 @@ class PigeonController extends Controller
         }
 
         $request->validate([
-            'bague' => 'sometimes|string|unique:pigeons,bague,' . $pigeon->id,
+            'bague' => [
+                'sometimes',
+                'string',
+                \Illuminate\Validation\Rule::unique('pigeons')->where(function ($query) {
+                    return $query->where('user_id', auth()->id());
+                })->ignore($pigeon->id)
+            ],
             'sexe' => 'sometimes|in:male,femelle',
             'race' => 'sometimes|string',
             'date_naissance' => 'nullable|date|before_or_equal:today',
@@ -173,6 +194,12 @@ class PigeonController extends Controller
             ], 422);
         }
 
+        if ($pigeon->sortie) {
+            return response()->json([
+                'message' => 'Impossible de supprimer un pigeon sorti (vendu, mort ou perdu). Son historique reste consultable.'
+            ], 422);
+        }
+
         // Libérer la cage si le pigeon en occupait une
         if ($pigeon->cage) {
             $pigeon->cage->update([
@@ -181,28 +208,30 @@ class PigeonController extends Controller
             ]);
         }
 
-        // Rompre le couple si le pigeon était en couple
-        if ($pigeon->coupleComeMale) {
-            $pigeon->coupleComeMale->update(['actif' => false]);
-            if ($pigeon->coupleComeMale->cage) {
-                $pigeon->coupleComeMale->cage->update([
+        // Rompre le couple actif si le pigeon était en couple
+        $coupleMale = $pigeon->coupleComeMale()->where('actif', true)->first();
+        if ($coupleMale) {
+            $coupleMale->update(['actif' => false]);
+            if ($coupleMale->cage) {
+                $coupleMale->cage->update([
                     'statut' => 'libre',
                     'couple_id' => null,
                 ]);
             }
         }
 
-        if ($pigeon->coupleComeFemelle) {
-            $pigeon->coupleComeFemelle->update(['actif' => false]);
-            if ($pigeon->coupleComeFemelle->cage) {
-                $pigeon->coupleComeFemelle->cage->update([
+        $coupleFemelle = $pigeon->coupleComeFemelle()->where('actif', true)->first();
+        if ($coupleFemelle) {
+            $coupleFemelle->update(['actif' => false]);
+            if ($coupleFemelle->cage) {
+                $coupleFemelle->cage->update([
                     'statut' => 'libre',
                     'couple_id' => null,
                 ]);
             }
         }
 
-        $pigeon->delete(); // Utilise softDeletes de Laravel
+        $pigeon->delete(); // Suppression logique (soft delete)
 
         return response()->json([
             'message' => 'Pigeon supprimé avec succès'

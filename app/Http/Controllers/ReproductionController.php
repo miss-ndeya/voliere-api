@@ -193,19 +193,40 @@ class ReproductionController extends Controller
             ], 422);
         }
 
-        $request->validate([
+        // Valider chaque bague individuellement avec la règle unique par utilisateur
+        $validator = \Illuminate\Support\Facades\Validator::make($request->all(), [
             'pigeonneaux' => 'required|array|min:1',
-            'pigeonneaux.*.bague' => 'required|string|unique:pigeons,bague',
             'pigeonneaux.*.sexe' => 'required|in:male,femelle',
         ], [
             'pigeonneaux.required' => 'Au moins un pigeonneau est requis',
             'pigeonneaux.array' => 'Les pigeonneaux doivent être un tableau',
             'pigeonneaux.min' => 'Au moins un pigeonneau est requis',
-            'pigeonneaux.*.bague.required' => 'Le numéro de bague est requis pour chaque pigeonneau',
-            'pigeonneaux.*.bague.unique' => 'Ce numéro de bague est déjà utilisé',
             'pigeonneaux.*.sexe.required' => 'Le sexe est requis pour chaque pigeonneau',
             'pigeonneaux.*.sexe.in' => 'Le sexe doit être "male" ou "femelle"',
         ]);
+
+        // Valider les bagues manuellement
+        foreach ($request->pigeonneaux as $index => $pigeonneau) {
+            if (empty($pigeonneau['bague'])) {
+                $validator->errors()->add("pigeonneaux.{$index}.bague", 'Le numéro de bague est requis pour chaque pigeonneau');
+            } else {
+                // Vérifier l'unicité par utilisateur
+                $exists = Pigeon::where('bague', $pigeonneau['bague'])
+                    ->where('user_id', auth()->id())
+                    ->exists();
+                
+                if ($exists) {
+                    $validator->errors()->add("pigeonneaux.{$index}.bague", 'Ce numéro de bague est déjà utilisé');
+                }
+            }
+        }
+
+        if ($validator->fails()) {
+            return response()->json([
+                'message' => 'Erreur de validation',
+                'errors' => $validator->errors()
+            ], 422);
+        }
 
         // Compter les pigeonneaux déjà créés pour cette reproduction
         $couple = $reproduction->couple;
