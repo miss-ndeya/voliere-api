@@ -297,6 +297,22 @@ class CageController extends Controller
                 ], 422);
             }
 
+            // NOUVEAU: Vérifier que le mâle n'occupe pas déjà une cage seul
+            $male = $couple->male;
+            if ($male && $male->cage) {
+                return response()->json([
+                    'message' => "Le mâle ({$male->bague}) occupe déjà une cage seul. Veuillez d'abord libérer sa cage avant d'affecter le couple."
+                ], 422);
+            }
+
+            // NOUVEAU: Vérifier que la femelle n'occupe pas déjà une cage seule
+            $femelle = $couple->femelle;
+            if ($femelle && $femelle->cage) {
+                return response()->json([
+                    'message' => "La femelle ({$femelle->bague}) occupe déjà une cage seule. Veuillez d'abord libérer sa cage avant d'affecter le couple."
+                ], 422);
+            }
+
             $cage->update([
                 'statut' => 'couple',
                 'couple_id' => $couple->id,
@@ -304,8 +320,6 @@ class CageController extends Controller
             ]);
 
             // Enregistrer dans l'historique
-            $male = $couple->male;
-            $femelle = $couple->femelle;
             CageHistory::create([
                 'cage_id' => $cage->id,
                 'user_id' => auth()->id(),
@@ -412,14 +426,28 @@ class CageController extends Controller
         return response()->json($pigeons);
     }
 
-    // Récupérer les couples disponibles pour affectation (actifs et sans cage)
+    // Récupérer les couples disponibles pour affectation (actifs, sans cage, et dont les membres ne sont pas en cage seuls)
     public function couplesDisponibles()
     {
         $couples = Couple::where('user_id', auth()->id())
             ->where('actif', true)
             ->whereDoesntHave('cage')
             ->with(['male:id,bague', 'femelle:id,bague'])
-            ->get();
+            ->get()
+            ->filter(function($couple) {
+                // Vérifier que le mâle n'occupe pas une cage seul
+                if ($couple->male && $couple->male->cage) {
+                    return false;
+                }
+                
+                // Vérifier que la femelle n'occupe pas une cage seule
+                if ($couple->femelle && $couple->femelle->cage) {
+                    return false;
+                }
+                
+                return true;
+            })
+            ->values(); // Réindexer le tableau
 
         return response()->json($couples);
     }
