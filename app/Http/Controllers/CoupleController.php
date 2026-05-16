@@ -4,7 +4,9 @@ namespace App\Http\Controllers;
 
 use App\Models\Couple;
 use App\Models\Pigeon;
+use App\Services\CageAffectationService;
 use Illuminate\Http\Request;
+use Illuminate\Support\Facades\DB;
 
 class CoupleController extends Controller
 {
@@ -27,6 +29,7 @@ class CoupleController extends Controller
             'male_id' => 'required|exists:pigeons,id',
             'femelle_id' => 'required|exists:pigeons,id',
             'date_formation' => 'required|date|before_or_equal:today',
+            'cage_id' => 'nullable|exists:cages,id',
         ], [
             'male_id.required' => 'Le mâle est requis',
             'male_id.exists' => 'Le mâle sélectionné n\'existe pas',
@@ -101,12 +104,62 @@ class CoupleController extends Controller
             ], 422);
         }
 
-        $couple = Couple::create([
-            ...$request->all(),
-            'user_id' => auth()->id(),
-        ]);
+        $cageId = $request->input('cage_id');
 
-        return response()->json($couple->load(['male', 'femelle']), 201);
+        try {
+            $result = DB::transaction(function () use ($request, $male, $femelle, $cageId) {
+                $couple = Couple::create([
+                    'male_id' => $request->male_id,
+                    'femelle_id' => $request->femelle_id,
+                    'date_formation' => $request->date_formation,
+                    'user_id' => auth()->id(),
+                ]);
+
+                $couple->load(['male.cage', 'femelle.cage']);
+                $avertissement = null;
+                $cageMessage = null;
+
+                if ($cageId) {
+                    $affectation = app(CageAffectationService::class)->affecterCouple(
+                        (int) $cageId,
+                        $couple->id,
+                        auth()->id()
+                    );
+
+                    if (!$affectation['ok']) {
+                        throw new \RuntimeException($affectation['message']);
+                    }
+
+                    $cageMessage = $affectation['message'];
+                    $couple = $couple->fresh()->load(['male.cage', 'femelle.cage', 'cage']);
+                } else {
+                    $cageMale = $male->cage;
+                    $cageFemelle = $femelle->cage;
+
+                    if ($cageMale && $cageFemelle && $cageMale->id !== $cageFemelle->id) {
+                        $avertissement = "Le mâle ({$male->bague}) et la femelle ({$femelle->bague}) sont dans des cages séparées ({$cageMale->numero} et {$cageFemelle->numero}). Affectez le couple à une cage pour les regrouper.";
+                    } elseif ($cageMale && !$cageFemelle) {
+                        $avertissement = "Le mâle occupe déjà la cage {$cageMale->numero}. Affectez le couple à cette cage pour regrouper les deux pigeons.";
+                    } elseif ($cageFemelle && !$cageMale) {
+                        $avertissement = "La femelle occupe déjà la cage {$cageFemelle->numero}. Affectez le couple à cette cage pour regrouper les deux pigeons.";
+                    }
+                }
+
+                return compact('couple', 'avertissement', 'cageMessage');
+            });
+        } catch (\RuntimeException $e) {
+            return response()->json(['message' => $e->getMessage()], 422);
+        }
+
+        $payload = $result['couple']->toArray();
+        if ($result['avertissement']) {
+            $payload['avertissement'] = $result['avertissement'];
+        }
+        if ($result['cageMessage']) {
+            $payload['cage_message'] = $result['cageMessage'];
+        }
+
+        return response()->json($payload, 201);
     }
 
     // Voir un couple

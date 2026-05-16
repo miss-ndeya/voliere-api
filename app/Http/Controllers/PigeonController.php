@@ -3,7 +3,9 @@
 namespace App\Http\Controllers;
 
 use App\Models\Pigeon;
+use App\Services\CageAffectationService;
 use Illuminate\Http\Request;
+use Illuminate\Support\Facades\DB;
 
 class PigeonController extends Controller
 {
@@ -42,6 +44,7 @@ class PigeonController extends Controller
             'date_naissance' => 'nullable|date|before_or_equal:today',
             'pere_id' => 'nullable|exists:pigeons,id',
             'mere_id' => 'nullable|exists:pigeons,id',
+            'cage_id' => 'nullable|exists:cages,id',
         ], [
             'bague.required' => 'Le numéro de bague est requis',
             'bague.unique' => 'Ce numéro de bague est déjà utilisé',
@@ -54,12 +57,45 @@ class PigeonController extends Controller
             'mere_id.exists' => 'La mère sélectionnée n\'existe pas',
         ]);
 
-        $pigeon = Pigeon::create([
-            ...$request->all(),
-            'user_id' => auth()->id(),
-        ]);
+        $payload = $request->only(['bague', 'sexe', 'race', 'date_naissance', 'pere_id', 'mere_id']);
+        $cageId = $request->input('cage_id');
 
-        return response()->json($pigeon, 201);
+        try {
+            $result = DB::transaction(function () use ($payload, $cageId) {
+                $pigeon = Pigeon::create([
+                    ...$payload,
+                    'user_id' => auth()->id(),
+                ]);
+
+                $response = ['pigeon' => $pigeon, 'cage_message' => null];
+
+                if ($cageId) {
+                    $affectation = app(CageAffectationService::class)->affecterPigeon(
+                        (int) $cageId,
+                        $pigeon->id,
+                        auth()->id()
+                    );
+
+                    if (!$affectation['ok']) {
+                        throw new \RuntimeException($affectation['message']);
+                    }
+
+                    $response['cage_message'] = $affectation['message'];
+                    $response['pigeon'] = $pigeon->fresh()->load('cage');
+                }
+
+                return $response;
+            });
+        } catch (\RuntimeException $e) {
+            return response()->json(['message' => $e->getMessage()], 422);
+        }
+
+        $json = $result['pigeon']->toArray();
+        if ($result['cage_message']) {
+            $json['cage_message'] = $result['cage_message'];
+        }
+
+        return response()->json($json, 201);
     }
 
     // Voir un pigeon

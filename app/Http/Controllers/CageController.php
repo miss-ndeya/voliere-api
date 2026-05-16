@@ -215,13 +215,6 @@ class CageController extends Controller
             return response()->json(['message' => 'Non autorisé'], 403);
         }
 
-        // Vérifier que la cage est libre
-        if ($cage->statut !== 'libre') {
-            return response()->json([
-                'message' => 'Cette cage est déjà occupée. Veuillez d\'abord la libérer.'
-            ], 422);
-        }
-
         $request->validate([
             'type' => 'required|in:pigeon,couple',
             'id' => 'required|integer',
@@ -233,6 +226,12 @@ class CageController extends Controller
         ]);
 
         if ($request->type === 'pigeon') {
+            if ($cage->statut !== 'libre') {
+                return response()->json([
+                    'message' => 'Cette cage est déjà occupée. Veuillez d\'abord la libérer.'
+                ], 422);
+            }
+
             $pigeon = Pigeon::where('user_id', auth()->id())->findOrFail($request->id);
 
             // Vérifier que le pigeon est actif
@@ -281,55 +280,43 @@ class CageController extends Controller
             ]);
 
         } else {
-            $couple = Couple::where('user_id', auth()->id())->with(['male', 'femelle'])->findOrFail($request->id);
+            $couple = Couple::where('user_id', auth()->id())
+                ->with(['male.cage', 'femelle.cage'])
+                ->findOrFail($request->id);
 
-            // Vérifier que le couple est actif
             if (!$couple->actif) {
                 return response()->json([
                     'message' => 'Impossible d\'affecter ce couple. Seuls les couples actifs peuvent être affectés à une cage.'
                 ], 422);
             }
 
-            // Vérifier que le couple n'est pas déjà dans une cage
             if ($couple->cage) {
                 return response()->json([
                     'message' => 'Ce couple est déjà affecté à une cage. Veuillez d\'abord le retirer de sa cage actuelle.'
                 ], 422);
             }
 
-            // NOUVEAU: Vérifier que le mâle n'occupe pas déjà une cage seul
+            $result = $this->affecterCoupleDansCage($couple, $cage);
+            if ($result instanceof \Illuminate\Http\JsonResponse) {
+                return $result;
+            }
+
+            ['cage' => $cage, 'cages_liberes' => $cagesLiberees, 'fusion' => $fusion] = $result;
             $male = $couple->male;
-            if ($male && $male->cage) {
-                return response()->json([
-                    'message' => "Le mâle ({$male->bague}) occupe déjà une cage seul. Veuillez d'abord libérer sa cage avant d'affecter le couple."
-                ], 422);
-            }
-
-            // NOUVEAU: Vérifier que la femelle n'occupe pas déjà une cage seule
             $femelle = $couple->femelle;
-            if ($femelle && $femelle->cage) {
-                return response()->json([
-                    'message' => "La femelle ({$femelle->bague}) occupe déjà une cage seule. Veuillez d'abord libérer sa cage avant d'affecter le couple."
-                ], 422);
+
+            $message = 'Couple affecté avec succès';
+            if (count($cagesLiberees) > 0) {
+                $numeros = implode(', ', $cagesLiberees);
+                $message .= ". Cage(s) libérée(s) : {$numeros}. Les deux pigeons sont maintenant dans la cage {$cage->numero}.";
+            } elseif ($fusion) {
+                $message .= ". Le pigeon déjà présent dans cette cage a été regroupé avec son partenaire.";
             }
 
-            $cage->update([
-                'statut' => 'couple',
-                'couple_id' => $couple->id,
-                'pigeon_id' => null,
-            ]);
-
-            // Enregistrer dans l'historique
-            CageHistory::create([
-                'cage_id' => $cage->id,
-                'user_id' => auth()->id(),
-                'action' => 'affectation_couple',
-                'description' => "Couple {$male->bague} × {$femelle->bague} affecté",
-                'metadata' => [
-                    'couple_id' => $couple->id,
-                    'male_bague' => $male->bague,
-                    'femelle_bague' => $femelle->bague
-                ],
+            return response()->json([
+                'message' => $message,
+                'cages_liberes' => $cagesLiberees,
+                'cage' => $cage->load(['pigeon', 'couple.male', 'couple.femelle']),
             ]);
         }
 
@@ -337,6 +324,114 @@ class CageController extends Controller
             'message' => 'Cage affectée avec succès',
             'cage' => $cage->load(['pigeon', 'couple.male', 'couple.femelle']),
         ]);
+    }
+
+    /**
+     * Regroupe un couple dans une seule cage (libère les cages solo des partenaires si besoin).
+     *
+     * @return array{cage: Cage, cages_liberes: array, fusion: bool}|\Illuminate\Http\JsonResponse
+     */
+    private function affecterCoupleDansCage(Couple $couple, Cage $cage)
+    {
+        $male = $couple->male;
+        $femelle = $couple->femelle;
+        $cagesLiberees = [];
+        $fusion = false;
+
+        if (!$male || !$femelle) {
+            return response()->json(['message' => 'Couple incomplet (mâle ou femelle manquant)'], 422);
+        }
+
+        $cageMale = $male->cage;
+        $cageFemelle = $femelle->cage;
+
+        // Cage occupée par un pigeon qui n'appartient pas au couple
+        if ($cage->statut === 'occupe' && $cage->pigeon_id !== $male->id && $cage->pigeon_id !== $femelle->id) {
+            return response()->json([
+                'message' => 'Cette cage est occupée par un autre pigeon. Choisissez une cage libre ou celle d\'un des deux partenaires.'
+            ], 422);
+        }
+
+        if ($cage->statut === 'couple' && $cage->couple_id !== $couple->id) {
+            return response()->json([
+                'message' => 'Cette cage est déjà occupée par un autre couple.'
+            ], 422);
+        }
+
+        // Fusion sur la cage où un partenaire est déjà seul
+        if ($cage->statut === 'occupe' && ($cage->pigeon_id === $male->id || $cage->pigeon_id === $femelle->id)) {
+            $fusion = true;
+            $autreCage = ($cage->pigeon_id === $male->id) ? $cageFemelle : $cageMale;
+            if ($autreCage && $autreCage->id !== $cage->id) {
+                $cagesLiberees[] = $this->libererCageSolo($autreCage);
+            }
+        } else {
+            if ($cage->statut !== 'libre') {
+                return response()->json([
+                    'message' => 'Cette cage n\'est pas disponible pour ce couple.'
+                ], 422);
+            }
+
+            if ($cageMale && $cageMale->id !== $cage->id) {
+                $cagesLiberees[] = $this->libererCageSolo($cageMale);
+            }
+            if ($cageFemelle && $cageFemelle->id !== $cage->id) {
+                $cagesLiberees[] = $this->libererCageSolo($cageFemelle);
+            }
+        }
+
+        $cage->update([
+            'statut' => 'couple',
+            'couple_id' => $couple->id,
+            'pigeon_id' => null,
+        ]);
+
+        CageHistory::create([
+            'cage_id' => $cage->id,
+            'user_id' => auth()->id(),
+            'action' => 'affectation_couple',
+            'description' => "Couple {$male->bague} × {$femelle->bague} affecté",
+            'metadata' => [
+                'couple_id' => $couple->id,
+                'male_bague' => $male->bague,
+                'femelle_bague' => $femelle->bague,
+                'cages_liberes' => $cagesLiberees,
+            ],
+        ]);
+
+        $cage->refresh();
+
+        return [
+            'cage' => $cage,
+            'cages_liberes' => array_filter($cagesLiberees),
+            'fusion' => $fusion,
+        ];
+    }
+
+    /**
+     * Libère une cage occupée par un seul pigeon. Retourne le numéro de la cage.
+     */
+    private function libererCageSolo(Cage $cage): string
+    {
+        $cage->load('pigeon');
+        $numero = $cage->numero;
+        $bague = $cage->pigeon?->bague ?? '?';
+
+        $cage->update([
+            'statut' => 'libre',
+            'pigeon_id' => null,
+            'couple_id' => null,
+        ]);
+
+        CageHistory::create([
+            'cage_id' => $cage->id,
+            'user_id' => auth()->id(),
+            'action' => 'liberation',
+            'description' => "Pigeon {$bague} retiré (regroupement du couple)",
+            'metadata' => ['pigeon_bague' => $bague, 'motif' => 'regroupement_couple'],
+        ]);
+
+        return $numero;
     }
 
     // Libérer une cage
@@ -426,28 +521,15 @@ class CageController extends Controller
         return response()->json($pigeons);
     }
 
-    // Récupérer les couples disponibles pour affectation (actifs, sans cage, et dont les membres ne sont pas en cage seuls)
+    // Couples actifs sans cage « couple » (les partenaires peuvent être dans des cages séparées — regroupement à l'affectation)
     public function couplesDisponibles()
     {
         $couples = Couple::where('user_id', auth()->id())
             ->where('actif', true)
             ->whereDoesntHave('cage')
-            ->with(['male:id,bague', 'femelle:id,bague'])
-            ->get()
-            ->filter(function($couple) {
-                // Vérifier que le mâle n'occupe pas une cage seul
-                if ($couple->male && $couple->male->cage) {
-                    return false;
-                }
-                
-                // Vérifier que la femelle n'occupe pas une cage seule
-                if ($couple->femelle && $couple->femelle->cage) {
-                    return false;
-                }
-                
-                return true;
-            })
-            ->values(); // Réindexer le tableau
+            ->with(['male:id,bague', 'femelle:id,bague', 'male.cage:id,numero', 'femelle.cage:id,numero'])
+            ->orderBy('id')
+            ->get();
 
         return response()->json($couples);
     }
