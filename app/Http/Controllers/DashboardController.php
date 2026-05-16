@@ -7,46 +7,67 @@ use App\Models\Couple;
 use App\Models\Cage;
 use App\Models\Reproduction;
 use App\Models\Sortie;
+use App\Services\ReproductionWorkflowService;
+use Carbon\Carbon;
 use Illuminate\Http\Request;
 
 class DashboardController extends Controller
 {
-    /**
-     * Récupérer toutes les statistiques du dashboard
-     * Calculs effectués côté serveur pour optimiser les performances
-     */
     public function index(Request $request)
     {
         $userId = $request->user()->id;
 
-        // Récupérer les données
         $pigeons = Pigeon::where('user_id', $userId)->get();
         $couples = Couple::where('user_id', $userId)
-            ->with(['male', 'femelle'])
+            ->with(['male.cage', 'femelle.cage', 'cage'])
             ->get();
         $cages = Cage::where('user_id', $userId)->get();
-        $reproductions = Reproduction::where('user_id', $userId)
+        $allReproductions = Reproduction::where('user_id', $userId)
             ->with(['couple.male', 'couple.femelle'])
-            ->latest()
-            ->take(5)
-            ->get();
+            ->orderByDesc('date_ponte')
+            ->get()
+            ->map(fn ($r) => ReproductionWorkflowService::enrich($r));
+
         $sorties = Sortie::where('user_id', $userId)->get();
 
-        // Calculs des statistiques
         $activePigeons = $pigeons->where('statut', 'actif');
-        $activeCouples = $couples->where('actif', true); // Correction: actif au lieu de statut
+        $activeCouples = $couples->where('actif', true);
         $freeCages = $cages->where('statut', 'libre');
         $occupiedCages = $cages->whereIn('statut', ['occupe', 'couple']);
-
-        // Statistiques des ventes
         $ventes = $sorties->where('type', 'vente');
-        $totalRevenue = $ventes->sum('prix');
-
-        // Taux d'occupation
         $totalCages = $cages->count();
-        $occupancyRate = $totalCages > 0 
-            ? round(($occupiedCages->count() / $totalCages) * 100) 
+        $occupancyRate = $totalCages > 0
+            ? round(($occupiedCages->count() / $totalCages) * 100)
             : 0;
+
+        $today = Carbon::today();
+        $weekEnd = $today->copy()->addDays(7);
+
+        $incubation = $allReproductions->whereIn('statut', [
+            ReproductionWorkflowService::STATUT_INCUBATION,
+            ReproductionWorkflowService::STATUT_ECLOSION_PREVUE,
+        ]);
+
+        $aBaguer = $allReproductions->where('statut', ReproductionWorkflowService::STATUT_A_BAGUER);
+
+        $eclosionsSemaine = $allReproductions->filter(function ($r) use ($today, $weekEnd) {
+            if (!$r->date_eclosion) {
+                return false;
+            }
+            $d = Carbon::parse($r->date_eclosion);
+            return $d->between($today, $weekEnd);
+        });
+
+        $couplesSansCage = $activeCouples->filter(fn ($c) => !$c->cage);
+
+        $couplesCagesSeparees = $activeCouples->filter(function ($c) {
+            if ($c->cage) {
+                return false;
+            }
+            $cMale = $c->male?->cage;
+            $cFem = $c->femelle?->cage;
+            return $cMale && $cFem && $cMale->id !== $cFem->id;
+        });
 
         return response()->json([
             'stats' => [
@@ -66,14 +87,56 @@ class DashboardController extends Controller
                 ],
                 'ventes' => [
                     'nombre' => $ventes->count(),
-                    'revenu' => $totalRevenue,
+                    'revenu' => $ventes->sum('prix'),
+                ],
+                'reproductions' => [
+                    'en_incubation' => $incubation->count(),
+                    'a_baguer' => $aBaguer->count(),
+                    'eclosions_semaine' => $eclosionsSemaine->count(),
                 ],
             ],
-            'recentReproductions' => $reproductions->map(function ($reproduction) {
+            'alertes' => [
+                [
+                    'type' => 'a_baguer',
+                    'count' => $aBaguer->count(),
+                    'message' => $aBaguer->count() > 0
+                        ? "{$aBaguer->count()} couvée(s) à baguer après éclosion"
+                        : null,
+                    'lien' => '/reproductions',
+                ],
+                [
+                    'type' => 'eclosion',
+                    'count' => $eclosionsSemaine->count(),
+                    'message' => $eclosionsSemaine->count() > 0
+                        ? "{$eclosionsSemaine->count()} éclosion(s) prévue(s) cette semaine"
+                        : null,
+                    'lien' => '/reproductions',
+                ],
+                [
+                    'type' => 'couple_sans_cage',
+                    'count' => $couplesSansCage->count(),
+                    'message' => $couplesSansCage->count() > 0
+                        ? "{$couplesSansCage->count()} couple(s) actif(s) sans cage"
+                        : null,
+                    'lien' => '/visualisation',
+                ],
+                [
+                    'type' => 'cages_separees',
+                    'count' => $couplesCagesSeparees->count(),
+                    'message' => $couplesCagesSeparees->count() > 0
+                        ? "{$couplesCagesSeparees->count()} couple(s) dans des cages séparées"
+                        : null,
+                    'lien' => '/visualisation',
+                ],
+            ],
+            'recentReproductions' => $allReproductions->take(5)->map(function ($reproduction) {
                 return [
                     'id' => $reproduction->id,
                     'date_ponte' => $reproduction->date_ponte,
-                    'nombre_jeunes' => $reproduction->nombre_jeunes,
+                    'date_eclosion' => $reproduction->date_eclosion,
+                    'nb_jeunes' => $reproduction->nb_jeunes,
+                    'statut' => $reproduction->statut,
+                    'statut_label' => ReproductionWorkflowService::statutLabel($reproduction->statut),
                     'male' => [
                         'id' => $reproduction->couple->male->id ?? null,
                         'bague' => $reproduction->couple->male->bague ?? '?',
@@ -83,7 +146,7 @@ class DashboardController extends Controller
                         'bague' => $reproduction->couple->femelle->bague ?? '?',
                     ],
                 ];
-            }),
+            })->values(),
         ]);
     }
 }
